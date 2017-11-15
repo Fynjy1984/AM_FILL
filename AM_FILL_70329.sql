@@ -75,7 +75,7 @@ Procedure in_table
 , p_options varchar2 := '');
 /*
    IN_SHEET: Save filled sheet with new name after source sheet,
-             clears data from source sheet, a new sheet becomes active & visible.
+             clears data from source sheet, a new sheet becomes active and visible.
          WARNING: the new sheet name does not check (length, allowed chars)
     
    p_options:
@@ -120,7 +120,7 @@ Function new_workbook return BLOB;
 * -- insert rows of query into Sheet1 from row 12 column B use styles of cells B12, C12, D12, ...
 *    am_fill.in_table('select <some_fields> from <some_table>','Sheet1!B12','i');  
 * ...
-* -- fill named range cell with 2 cols & 10 rows offset using destination cell style
+* -- fill named range cell with 2 cols and 10 rows offset using destination cell style
 *    am_fill.in_field(<some_variable>, 'range1!C11');
 * ...
 * -- manually insert rows using 'Sheet1!B12' cell style 
@@ -163,6 +163,7 @@ type tp_loc is record
 type tp_one_field is record
   ( type char(1)  -- N,D,S
   , value number  -- for strings (S) index tp_str_ind
+  , formula varchar2(1000)
   );
 -- field access: (sht)(row)(row ins)(col)
 type tp_fcols is table of tp_one_field index by pls_integer;
@@ -722,6 +723,8 @@ Procedure add_value
   ( p_value number
   , p_type char
   , p_loc tp_loc
+  , p_formula varchar2 := NULL
+
   )
 is
   t_field tp_one_field;
@@ -730,6 +733,7 @@ begin
   context.current_sht:=p_loc.sht_nr;
   t_field.type := p_type;
   t_field.value := p_value;
+  t_field.formula := p_formula;
   t_loc := align_loc(p_loc, context.insmode); -- real alignment 
   context.fields( t_loc.sht_nr )( t_loc.row_nr )( t_loc.row_off )( t_loc.col_nr ) := t_field;
 --dbms_output.put_line(t_loc.sht_nr||'|'||t_loc.row_nr||'|'||t_loc.row_off||'|'||t_loc.col_nr||'|'||t_loc.col_off);
@@ -1057,12 +1061,19 @@ as
   t_nd dbms_xmldom.domnode;
   t_nl2 dbms_xmldom.domnodelist;
   t_nl3 dbms_xmldom.domnodelist;
+  t_nd_f dbms_xmldom.domnode;
   t_s varchar2(50);
   t_nr number;
   t_val varchar2(4000);
+  t_formula varchar2(4000);
   t_r varchar2(50);
   t_t varchar2(50);
   t_ro pls_integer;
+  
+  l_nattrs DBMS_XMLDOM.DOMNamedNodeMap;  -- список атрибутов узла
+  l_node   dbms_xmldom.domnode;
+  l_sattrs VARCHAR2(2000);               -- текстовое описание атрибутов
+  
 begin
   clear_styles;
   t_nd := blob2node( as_zip.get_file( p_xlsx, 'xl/worksheets/sheet' || p_sheet_nr || '.xml' ) );
@@ -1089,6 +1100,25 @@ begin
       t_loc.sht_nr := p_sheet_nr;
 -- dbms_output.put_line(t_r||' '||t_loc.row_nr||' '||t_loc.col_nr);
       t_val := dbms_xslprocessor.valueof( dbms_xmldom.item( t_nl2, j ), 'v' );
+      t_formula := dbms_xslprocessor.valueof( dbms_xmldom.item( t_nl2, j ), 'f' );
+      
+      t_nd_f:=dbms_xslprocessor.selectsinglenode(dbms_xmldom.item( t_nl2, j ), 'f');
+      l_sattrs := null;
+      l_nattrs := DBMS_XMLDOM.GetAttributes(t_nd_f);  
+      
+      -- вывести имена атрибутов и их значения одной строкой
+      IF NOT DBMS_XMLDOM.isNull(l_nattrs) THEN
+      FOR i IN 0..DBMS_XMLDOM.GetLength(l_nattrs)-1 LOOP
+        l_node    := DBMS_XMLDOM.item(l_nattrs,i);
+        l_sattrs  := l_sattrs||DBMS_XMLDOM.GetNodeName(l_node)||'="'
+                     ||DBMS_XMLDOM.GetNodeValue(l_node)||'" ';
+      END LOOP;
+      if t_formula is not null or l_sattrs is not null then
+        t_formula := '<f'||case when l_sattrs is not null then ' '||l_sattrs end||'>'||t_formula||'</f>';
+      end if;
+      --dbms_output.put_line('Attrs: '||'<f '||l_sattrs||'>'||t_formula||'</f>');              
+      END IF;
+      
       t_t := dbms_xslprocessor.valueof( dbms_xmldom.item( t_nl2, j ), '@t' );
       t_s := dbms_xslprocessor.valueof( dbms_xmldom.item( t_nl2, j ), '@s' );
       if t_t is null or t_t='n'-- ( 'str', 'inlineStr', 'e' )
@@ -1111,6 +1141,7 @@ begin
 -- or replacing with initial cell value
         context.fields(t_loc.sht_nr)(t_loc.row_nr)(0)(t_loc.col_nr).value := t_nr;
         context.fields(t_loc.sht_nr)(t_loc.row_nr)(0)(t_loc.col_nr).type := t_ftype;
+        context.fields(t_loc.sht_nr)(t_loc.row_nr)(0)(t_loc.col_nr).formula := t_formula;
       end if;
       add_style(t_s, t_ftype, t_loc.row_nr, t_loc.col_nr);
     end loop; -- col
@@ -1243,11 +1274,17 @@ begin
              , '<c r="'
              ||alfan2cell(t_row_of+r+ro,c)||'" '||get_cell_style(r, c, t_fld)
              ||case
-                 when t_fld.value is null then '/>'
-                 else '><v>'
+                 when t_fld.value is null and t_fld.formula is null then '/>'
+                 
+                 else '>'||
+                  case
+                   when t_fld.formula is not null then t_fld.formula
+                   else '<v>'
                    ||to_char(t_fld.value, 'TM9', 'NLS_NUMERIC_CHARACTERS=.,' )
-                   ||'</v></c>'
-               end
+                   ||'</v>' 
+                  end
+               ||'</c>'
+               end   
           );
           if merge_exists(s,r,c)
           then
@@ -1575,4 +1612,3 @@ end;
  
 end "AM_FILL";
 /
-
